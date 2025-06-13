@@ -1,100 +1,105 @@
 import socket
+import time
 import hmac
 import hashlib
-import time
-import random
-import pandas as pd
+import os
+from Crypto.Hash import RIPEMD160
 from Crypto.Hash import CMAC
 from Crypto.Cipher import AES
 
-# Konfigurasi client
+# Konfigurasi
 HOST = '127.0.0.1'
 PORT = 5000
-KEY = b'supersecretkeysupersecretkey12'
+KEY = b'0123456789ABCDEF0123456789ABCDEF'  # 32 bytes AES key
 
-# Fungsi MAC
-def generate_mac(data, algo):
-    if algo == "HMAC-SHA256":
+algorithms_list = ['HMAC-SHA256', 'RIPEMD-160', 'AES-CMAC']
+plaintext_size = 1024 * 10  # 10 KB
+
+# Fungsi generate MAC
+def compute_mac(data, algo):
+    if algo == 'HMAC-SHA256':
         return hmac.new(KEY, data, hashlib.sha256).digest()
-    elif algo == "RIPEMD-256":
-        h = hashlib.new('ripemd160')
+    elif algo == 'RIPEMD-160':
+        h = RIPEMD160.new()
         h.update(data)
         return h.digest()
-    elif algo == "AES-256-CMAC":
-        cobj = CMAC.new(KEY, ciphermod=AES)
-        cobj.update(data)
-        return cobj.digest()
+    elif algo == 'AES-CMAC':
+        c = CMAC.new(KEY, ciphermod=AES)
+        c.update(data)
+        return c.digest()
     else:
-        raise ValueError("Algoritma tidak dikenali")
+        raise ValueError(f"Unknown algorithm: {algo}")
 
-# Input pilihan algoritma
-print("Pilih algoritma Authentication Code:")
-print("1. HMAC-SHA256")
-print("2. RIPEMD-256")
-print("3. AES-256-CMAC")
-pilihan = input("Masukkan pilihan (1/2/3): ")
+# Fungsi pilih algoritma
+def select_algorithm():
+    print("Pilih algoritma:")
+    for idx, algo in enumerate(algorithms_list, 1):
+        print(f"{idx}. {algo}")
+    
+    while True:
+        try:
+            choice = int(input("Masukkan nomor pilihan: "))
+            if 1 <= choice <= len(algorithms_list):
+                return algorithms_list[choice - 1]
+            else:
+                print("Pilihan tidak valid.")
+        except ValueError:
+            print("Input harus angka.")
 
-if pilihan == '1':
-    ALGORITHM = "HMAC-SHA256"
-elif pilihan == '2':
-    ALGORITHM = "RIPEMD-256"
-elif pilihan == '3':
-    ALGORITHM = "AES-256-CMAC"
-else:
-    print("Pilihan tidak valid!")
-    exit()
+# Fungsi input jumlah sample
+def get_sample_count():
+    while True:
+        try:
+            count = int(input("Masukkan jumlah sample yang ingin dikirim: "))
+            if count > 0:
+                return count
+            else:
+                print("Jumlah sample harus lebih dari 0.")
+        except ValueError:
+            print("Input harus berupa angka.")
 
-# Ukuran data (Bytes)
-data_sizes = [1024, 10*1024, 100*1024, 1024*1024]
+# Fungsi utama loop client
+def main_loop():
+    while True:
+        selected_algo = select_algorithm()
+        samples_per_algorithm = get_sample_count()
 
-# Simpan hasil pengujian
-results = []
+        print(f"\nMenjalankan pengujian dengan algoritma: {selected_algo}")
+        print(f"Jumlah sample: {samples_per_algorithm}\n")
 
-with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_socket:
-    client_socket.connect((HOST, PORT))
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.connect((HOST, PORT))
 
-    # Kirim pilihan algoritma ke server
-    client_socket.sendall(ALGORITHM.ljust(20).encode())
+                # Kirim algoritma (kirim panjang + algoritma string)
+                algo_bytes = selected_algo.encode()
+                s.sendall(len(algo_bytes).to_bytes(1, 'big') + algo_bytes)
 
-    for size in data_sizes:
-        print(f"\nTesting data size: {size} Bytes")
+                for i in range(samples_per_algorithm):
+                    msg = os.urandom(plaintext_size)
 
-        total_comp_delay = 0
-        total_comm_delay = 0
+                    # Hitung MAC
+                    start_comp = time.time()
+                    mac = compute_mac(msg, selected_algo)
+                    end_comp = time.time()
+                    comp_delay = end_comp - start_comp
 
-        for i in range(100):
-            data = random.randbytes(size)
+                    # Kirim data: panjang data + data + MAC
+                    s.sendall(len(msg).to_bytes(4, 'big') + msg + mac)
 
-            # Computation delay
-            start_comp = time.time()
-            mac = generate_mac(data, ALGORITHM)
-            end_comp = time.time()
-            comp_delay = (end_comp - start_comp) * 1000
-            total_comp_delay += comp_delay
+                    print(f"Sample {i+1}/{samples_per_algorithm} | Comp Delay: {comp_delay:.6f}s")
 
-            # Communication delay
-            start_comm = time.time()
-            header = str(len(data)).ljust(20).encode()
-            client_socket.sendall(header)
-            client_socket.sendall(data)
-            client_socket.sendall(mac)
-            end_comm = time.time()
-            comm_delay = (end_comm - start_comm) * 1000
-            total_comm_delay += comm_delay
+            print("\nSesi pengujian selesai.\n")
 
-            print(f"Sample {i+1}: Comp {comp_delay:.3f} ms | Comm {comm_delay:.3f} ms")
+        except Exception as e:
+            print(f"Terjadi error: {e}\n")
 
-        avg_comp = total_comp_delay / 100
-        avg_comm = total_comm_delay / 100
+        # Tanya apakah mau lanjut lagi
+        ulang = input("Ingin melakukan pengujian lagi? (y/n): ").lower()
+        if ulang != 'y':
+            print("Program selesai.")
+            break
 
-        results.append({
-            "Algorithm": ALGORITHM,
-            "Data Size (Bytes)": size,
-            "Avg Computation Delay (ms)": avg_comp,
-            "Avg Communication Delay (ms)": avg_comm
-        })
-
-# Simpan hasil ke CSV
-df = pd.DataFrame(results)
-df.to_csv(f"results_{ALGORITHM}.csv", index=False)
-print("\nSemua hasil disimpan ke file CSV.")
+# Eksekusi program
+if __name__ == "__main__":
+    main_loop()
